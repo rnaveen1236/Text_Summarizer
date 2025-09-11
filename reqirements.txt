@@ -4,3 +4,4 @@ torch
 sentencepiece
 langchain 
 pypdf2
+python-docx
