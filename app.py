@@ -1,18 +1,16 @@
-# document_summarizer.py
-
 import streamlit as st
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from langchain.text_splitter import CharacterTextSplitter
 from PyPDF2 import PdfReader
+from docx import Document
 import re
-import torch
+from transformers import LEDTokenizer, LEDForConditionalGeneration
 
-# 1. Load model and tokenizer
-MODEL_NAME = "facebook/bart-large-cnn"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+# Load model and tokenizer
+model_name = "allenai/led-base-16384"
+tokenizer = LEDTokenizer.from_pretrained(model_name)
+model = LEDForConditionalGeneration.from_pretrained(model_name)
 
-# 2. Text extraction
+# Text extraction functions
 def load_text_from_pdf(file):
     reader = PdfReader(file)
     text = ""
@@ -22,55 +20,80 @@ def load_text_from_pdf(file):
             text += page_text + " "
     return text
 
-# 3. Text cleaning
+def load_text_from_txt(file):
+    return file.read().decode("utf-8")
+
+def load_text_from_docx(file):
+    doc = Document(file)
+    return " ".join([para.text for para in doc.paragraphs])
+
+def load_text(file, file_type):
+    if file_type == "pdf":
+        return load_text_from_pdf(file)
+    elif file_type == "txt":
+        return load_text_from_txt(file)
+    elif file_type == "docx":
+        return load_text_from_docx(file)
+    else:
+        return ""
+
+# Text cleaning
 def clean_text(text):
     text = text.lower()
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'[^\x00-\x7F]+', '', text)
     return text.strip()
 
-# 4. Chunking
-def chunk_text(text, chunk_size=1000, chunk_overlap=100):
-    splitter = CharacterTextSplitter(
-        separator=". ",
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len
+# LED summarization
+def summarize_chunk_led(chunk, max_length=500, min_length=100):
+    inputs = tokenizer(
+        chunk,
+        return_tensors="pt",
+        truncation=True,
+        max_length=16384
     )
-    return splitter.split_text(text)
-
-# 5. Summarization
-def summarize_chunk(chunk, max_length=150, num_beams=4, length_penalty=2.0):
-    inputs = tokenizer.encode(chunk, return_tensors="pt", truncation=True)
     summary_ids = model.generate(
-        inputs,
+        inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
         max_length=max_length,
-        num_beams=num_beams,
-        length_penalty=length_penalty,
+        min_length=min_length,
+        length_penalty=2.0,
+        num_beams=4,
         early_stopping=True
     )
     return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
-# 6. Map-Reduce summarization
-def summarize_document(text):
-    chunks = chunk_text(text)
-    summaries = [summarize_chunk(chunk) for chunk in chunks if len(chunk.split()) > 20]
-    combined_summary = " ".join(summaries)
-    if len(tokenizer.encode(combined_summary)) > 1024:
-        return summarize_chunk(combined_summary)
+# Recursive summarization
+def recursive_summarize_led(text, chunk_size=5000, overlap=500):
+    splitter = CharacterTextSplitter(
+        separator=". ",
+        chunk_size=chunk_size,
+        chunk_overlap=overlap,
+        length_function=len
+    )
+    chunks = splitter.split_text(text)
+    chunk_summaries = [summarize_chunk_led(chunk) for chunk in chunks if len(chunk.split()) > 20]
+    combined_summary = " ".join(chunk_summaries)
+
+    if len(combined_summary.split()) > 5000:
+        return recursive_summarize_led(combined_summary, chunk_size=2500, overlap=250)
     else:
         return combined_summary
 
-# 7. Streamlit UI
-st.set_page_config(page_title="📚 Document Summarizer", layout="wide")
-st.title("📚 Document Summarizer with BART")
+# Streamlit UI
+st.set_page_config(page_title="Document Summarizer", layout="wide")
+st.title("Document & Text Summarizer")
 
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+uploaded_file = st.file_uploader("Upload a document", type=["pdf", "txt", "docx"])
 input_text = st.text_area("Or paste your text here")
 
-if st.button("Summarize"):
+col1, _ = st.columns([1, 1])
+summarize_clicked = col1.button("Summarize")
+
+if summarize_clicked:
     if uploaded_file:
-        raw_text = load_text_from_pdf(uploaded_file)
+        file_type = uploaded_file.name.split(".")[-1].lower()
+        raw_text = load_text(uploaded_file, file_type)
     elif input_text:
         raw_text = input_text
     else:
@@ -78,11 +101,11 @@ if st.button("Summarize"):
         st.stop()
 
     cleaned = clean_text(raw_text)
-    st.subheader("📑 Extracted Text (Preview)")
+    st.subheader("Extracted Text (Preview)")
     st.write(cleaned[:1000] + "...")
 
-    with st.spinner("Summarizing..."):
-        final_summary = summarize_document(cleaned)
+    with st.spinner("Summarizing with AllenAI LED..."):
+        final_summary = recursive_summarize_led(cleaned)
 
-    st.subheader("📝 Summary")
+    st.subheader("Summary")
     st.write(final_summary)
